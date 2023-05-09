@@ -53,6 +53,10 @@ pub enum ValidationError {
     /// An invalid input was provided.
     #[error("{message}")]
     InvalidValue { message: String },
+
+    /// Internal server error occurred
+    #[error("Internal server error occurred")]
+    InternalServerError
 }
 
 /// Cryptographic algorithm errors

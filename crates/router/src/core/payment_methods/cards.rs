@@ -74,10 +74,21 @@ pub async fn add_payment_method(
     state: &routes::AppState,
     req: api::PaymentMethodCreate,
     merchant_account: &storage::MerchantAccount,
-) -> errors::RouterResponse<api::PaymentMethodResponse> {
-    req.validate()?;
+) -> errors::ValidationResult<api::PaymentMethodResponse> {
+    if let Err(e) = req.validate() {
+        return Err(e
+            .change_context(errors::ValidationError::InternalServerError)
+            .attach_printable("Validation failed"));
+    }
     let merchant_id = &merchant_account.merchant_id;
-    let customer_id = req.customer_id.clone().get_required_value("customer_id")?;
+    let customer_id = match req.customer_id.clone().get_required_value("customer_id") {
+        Ok(id) => id,
+        Err(e) => {
+            return Err(e
+                .change_context(errors::ValidationError::InternalServerError)
+                .attach_printable("Failed to generate customer_id"))
+        }
+    };
     let response = match req.card.clone() {
         Some(card) => add_card_to_locker(state, req, card, customer_id, merchant_account)
             .await
