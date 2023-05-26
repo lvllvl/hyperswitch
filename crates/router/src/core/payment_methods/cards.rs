@@ -261,10 +261,10 @@ pub async fn add_card_hs(
     merchant_account: &storage::MerchantAccount,
 ) -> errors::CustomResult<(api::PaymentMethodResponse, bool), errors::VaultError> {
     let locker = &state.conf.locker;
+    #[cfg(not(feature = "kms"))]
     let jwekey = &state.conf.jwekey;
-
     #[cfg(feature = "kms")]
-    let kms_config = &state.conf.kms;
+    let jwekey = &state.kms_secrets;
 
     let db = &*state.store;
     let merchant_id = &merchant_account.merchant_id;
@@ -275,16 +275,9 @@ pub async fn add_card_hs(
         .get_required_value("locker_id")
         .change_context(errors::VaultError::SaveCardFailed)?;
 
-    let request = payment_methods::mk_add_card_request_hs(
-        jwekey,
-        locker,
-        &card,
-        &customer_id,
-        merchant_id,
-        #[cfg(feature = "kms")]
-        kms_config,
-    )
-    .await?;
+    let request =
+        payment_methods::mk_add_card_request_hs(jwekey, locker, &card, &customer_id, merchant_id)
+            .await?;
 
     let stored_card_response = if !locker.mock_locker {
         let response = services::call_connector_api(state, request)
@@ -295,15 +288,10 @@ pub async fn add_card_hs(
             .get_response_inner("JweBody")
             .change_context(errors::VaultError::FetchCardFailed)?;
 
-        let decrypted_payload = payment_methods::get_decrypted_response_payload(
-            jwekey,
-            jwe_body,
-            #[cfg(feature = "kms")]
-            kms_config,
-        )
-        .await
-        .change_context(errors::VaultError::SaveCardFailed)
-        .attach_printable("Error getting decrypted response payload")?;
+        let decrypted_payload = payment_methods::get_decrypted_response_payload(jwekey, jwe_body)
+            .await
+            .change_context(errors::VaultError::SaveCardFailed)
+            .attach_printable("Error getting decrypted response payload")?;
         let stored_card_resp: payment_methods::StoreCardResp = decrypted_payload
             .parse_struct("StoreCardResp")
             .change_context(errors::VaultError::ResponseDeserializationFailed)?;
@@ -405,10 +393,10 @@ pub async fn get_card_from_hs_locker<'a>(
     card_reference: &'a str,
 ) -> errors::CustomResult<payment_methods::Card, errors::VaultError> {
     let locker = &state.conf.locker;
+    #[cfg(not(feature = "kms"))]
     let jwekey = &state.conf.jwekey;
-
     #[cfg(feature = "kms")]
-    let kms_config = &state.conf.kms;
+    let jwekey = &state.kms_secrets;
 
     let request = payment_methods::mk_get_card_request_hs(
         jwekey,
@@ -416,8 +404,6 @@ pub async fn get_card_from_hs_locker<'a>(
         customer_id,
         merchant_id,
         card_reference,
-        #[cfg(feature = "kms")]
-        kms_config,
     )
     .await
     .change_context(errors::VaultError::FetchCardFailed)
@@ -430,15 +416,10 @@ pub async fn get_card_from_hs_locker<'a>(
         let jwe_body: services::JweBody = response
             .get_response_inner("JweBody")
             .change_context(errors::VaultError::FetchCardFailed)?;
-        let decrypted_payload = payment_methods::get_decrypted_response_payload(
-            jwekey,
-            jwe_body,
-            #[cfg(feature = "kms")]
-            kms_config,
-        )
-        .await
-        .change_context(errors::VaultError::FetchCardFailed)
-        .attach_printable("Error getting decrypted response payload for get card")?;
+        let decrypted_payload = payment_methods::get_decrypted_response_payload(jwekey, jwe_body)
+            .await
+            .change_context(errors::VaultError::FetchCardFailed)
+            .attach_printable("Error getting decrypted response payload for get card")?;
         let get_card_resp: payment_methods::RetrieveCardResp = decrypted_payload
             .parse_struct("RetrieveCardResp")
             .change_context(errors::VaultError::FetchCardFailed)?;
@@ -494,10 +475,10 @@ pub async fn delete_card_from_hs_locker<'a>(
     card_reference: &'a str,
 ) -> errors::RouterResult<payment_methods::DeleteCardResp> {
     let locker = &state.conf.locker;
+    #[cfg(not(feature = "kms"))]
     let jwekey = &state.conf.jwekey;
-
     #[cfg(feature = "kms")]
-    let kms_config = &state.conf.kms;
+    let jwekey = &state.kms_secrets;
 
     let request = payment_methods::mk_delete_card_request_hs(
         jwekey,
@@ -505,8 +486,6 @@ pub async fn delete_card_from_hs_locker<'a>(
         customer_id,
         merchant_id,
         card_reference,
-        #[cfg(feature = "kms")]
-        kms_config,
     )
     .await
     .change_context(errors::ApiErrorResponse::InternalServerError)
@@ -518,15 +497,10 @@ pub async fn delete_card_from_hs_locker<'a>(
             .change_context(errors::ApiErrorResponse::InternalServerError)
             .attach_printable("Failed while executing call_connector_api for delete card");
         let jwe_body: services::JweBody = response.get_response_inner("JweBody")?;
-        let decrypted_payload = payment_methods::get_decrypted_response_payload(
-            jwekey,
-            jwe_body,
-            #[cfg(feature = "kms")]
-            kms_config,
-        )
-        .await
-        .change_context(errors::ApiErrorResponse::InternalServerError)
-        .attach_printable("Error getting decrypted response payload for delete card")?;
+        let decrypted_payload = payment_methods::get_decrypted_response_payload(jwekey, jwe_body)
+            .await
+            .change_context(errors::ApiErrorResponse::InternalServerError)
+            .attach_printable("Error getting decrypted response payload for delete card")?;
         let delete_card_resp: payment_methods::DeleteCardResp = decrypted_payload
             .parse_struct("DeleteCardResp")
             .change_context(errors::ApiErrorResponse::InternalServerError)?;
@@ -848,10 +822,14 @@ pub async fn list_payment_methods(
         .await
         .to_not_found_response(errors::ApiErrorResponse::MerchantAccountNotFound)?;
 
-    logger::debug!(mca_before_filtering=?all_mcas);
+    // filter out connectors based on the business country
+    let filtered_mcas =
+        helpers::filter_mca_based_on_business_details(all_mcas, payment_intent.as_ref());
+
+    logger::debug!(mca_before_filtering=?filtered_mcas);
 
     let mut response: Vec<ResponsePaymentMethodIntermediate> = vec![];
-    for mca in all_mcas {
+    for mca in filtered_mcas {
         let payment_methods = match mca.payment_methods_enabled {
             Some(pm) => pm,
             None => continue,
@@ -884,6 +862,12 @@ pub async fn list_payment_methods(
 
     let mut banks_consolidated_hm: HashMap<api_enums::PaymentMethodType, Vec<String>> =
         HashMap::new();
+
+    let mut bank_debits_consolidated_hm =
+        HashMap::<api_enums::PaymentMethodType, Vec<String>>::new();
+
+    let mut bank_transfer_consolidated_hm =
+        HashMap::<api_enums::PaymentMethodType, Vec<String>>::new();
 
     for element in response.clone() {
         let payment_method = element.payment_method;
@@ -975,6 +959,28 @@ pub async fn list_payment_methods(
                 banks_consolidated_hm.insert(element.payment_method_type, vec![connector]);
             }
         }
+
+        if element.payment_method == api_enums::PaymentMethod::BankDebit {
+            let connector = element.connector.clone();
+            if let Some(vector_of_connectors) =
+                bank_debits_consolidated_hm.get_mut(&element.payment_method_type)
+            {
+                vector_of_connectors.push(connector);
+            } else {
+                bank_debits_consolidated_hm.insert(element.payment_method_type, vec![connector]);
+            }
+        }
+
+        if element.payment_method == api_enums::PaymentMethod::BankTransfer {
+            let connector = element.connector.clone();
+            if let Some(vector_of_connectors) =
+                bank_transfer_consolidated_hm.get_mut(&element.payment_method_type)
+            {
+                vector_of_connectors.push(connector);
+            } else {
+                bank_transfer_consolidated_hm.insert(element.payment_method_type, vec![connector]);
+            }
+        }
     }
 
     let mut payment_method_responses: Vec<ResponsePaymentMethodsEnabled> = vec![];
@@ -994,6 +1000,8 @@ pub async fn list_payment_methods(
                 payment_experience: Some(payment_experience_types),
                 card_networks: None,
                 bank_names: None,
+                bank_debits: None,
+                bank_transfers: None,
             })
         }
 
@@ -1019,6 +1027,8 @@ pub async fn list_payment_methods(
                 card_networks: Some(card_network_types),
                 payment_experience: None,
                 bank_names: None,
+                bank_debits: None,
+                bank_transfers: None,
             })
         }
 
@@ -1028,26 +1038,80 @@ pub async fn list_payment_methods(
         })
     }
 
-    let mut bank_payment_method_types = vec![];
+    let mut bank_redirect_payment_method_types = vec![];
 
     for key in banks_consolidated_hm.iter() {
         let payment_method_type = *key.0;
         let connectors = key.1.clone();
         let bank_names = get_banks(state, payment_method_type, connectors)?;
-        bank_payment_method_types.push({
+        bank_redirect_payment_method_types.push({
             ResponsePaymentMethodTypes {
                 payment_method_type,
                 bank_names: Some(bank_names),
                 payment_experience: None,
                 card_networks: None,
+                bank_debits: None,
+                bank_transfers: None,
             }
         })
     }
 
-    if !bank_payment_method_types.is_empty() {
+    if !bank_redirect_payment_method_types.is_empty() {
         payment_method_responses.push(ResponsePaymentMethodsEnabled {
             payment_method: api_enums::PaymentMethod::BankRedirect,
-            payment_method_types: bank_payment_method_types,
+            payment_method_types: bank_redirect_payment_method_types,
+        });
+    }
+
+    let mut bank_debit_payment_method_types = vec![];
+
+    for key in bank_debits_consolidated_hm.iter() {
+        let payment_method_type = *key.0;
+        let connectors = key.1.clone();
+        bank_debit_payment_method_types.push({
+            ResponsePaymentMethodTypes {
+                payment_method_type,
+                bank_names: None,
+                payment_experience: None,
+                card_networks: None,
+                bank_debits: Some(api_models::payment_methods::BankDebitTypes {
+                    eligible_connectors: connectors.clone(),
+                }),
+                bank_transfers: None,
+            }
+        })
+    }
+
+    if !bank_debit_payment_method_types.is_empty() {
+        payment_method_responses.push(ResponsePaymentMethodsEnabled {
+            payment_method: api_enums::PaymentMethod::BankDebit,
+            payment_method_types: bank_debit_payment_method_types,
+        });
+    }
+
+    let mut bank_transfer_payment_method_types = vec![];
+
+    for key in bank_transfer_consolidated_hm.iter() {
+        let payment_method_type = *key.0;
+        let connectors = key.1.clone();
+        bank_transfer_payment_method_types.push({
+            ResponsePaymentMethodTypes {
+                payment_method_type,
+                bank_names: None,
+                payment_experience: None,
+                card_networks: None,
+                bank_debits: None,
+                bank_transfers: Some(api_models::payment_methods::BankTransferTypes {
+                    eligible_connectors: connectors,
+                }),
+            }
+        })
+    }
+
+    if !bank_transfer_payment_method_types.is_empty() {
+        payment_method_responses.push(ResponsePaymentMethodsEnabled {
+            payment_method: api_enums::PaymentMethod::BankTransfer,
+            payment_method_types: bank_transfer_payment_method_types,
         });
     }
 
@@ -1058,12 +1122,15 @@ pub async fn list_payment_methods(
             api::PaymentMethodListResponse {
                 redirect_url: merchant_account.return_url,
                 payment_methods: payment_method_responses,
+                mandate_payment: payment_attempt
+                    .and_then(|inner| inner.mandate_details)
+                    .map(ForeignInto::foreign_into),
             },
         )))
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn filter_payment_methods(
+pub async fn filter_payment_methods(
     payment_methods: Vec<serde_json::Value>,
     req: &mut api::PaymentMethodListRequest,
     resp: &mut Vec<ResponsePaymentMethodIntermediate>,
